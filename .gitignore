@@ -1,0 +1,32 @@
+# --- Credenciais e configuração local ---
+.env
+.env.*
+!.env.example
+
+# --- Ambiente virtual ---
+.venv/
+venv/
+env/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# --- Logs da automação ---
+*.log
+
+# --- Arquivos de estado (último USERID processado, por ambiente) ---
+sync_autores_state*.json
+
+# --- Editores / IDEs ---
+.vscode/
+.idea/
+*.swp
+
+# --- Sistema operacional ---
+Thumbs.db
+desktop.ini
+.DS_Store
