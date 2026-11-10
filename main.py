@@ -2,12 +2,14 @@
 Inclui NOVOS usuários do SAP Business One como AUTORES nos Modelos de Autorização, via SERVICE LAYER (forma suportada pela SAP).
 
 Regras:
-  - Usuário de VENDAS      -> todos os modelos cujo nome começa com "PV"
-  - Usuário NÃO de vendas  -> todos os modelos que NÃO começam com "PV"
+  - Cada departamento (Departments.Code) recebe os modelos cujo nome começa com
+    um dos prefixos definidos em regras_autores.json (ver regras_autores.example.json)
+  - Departamento sem regra (e "default": null) -> usuário NÃO é incluído (aviso no log)
   - Nome do usuário (UserName / OUSR.U_NAME) gravado sempre em MAIÚSCULAS
 
-"Novo usuário" = InternalKey maior que o último processado (arquivo de estado).
-Na 1ª execução o script apenas grava o ponto de partida (não altera nada).
+"Novo usuário" = InternalKey maior que o último processado (arquivo de estado,
+separado por base: o nome do CompanyDB entra no nome do arquivo).
+Na 1ª execução em cada base o script apenas grava o ponto de partida (não altera nada).
 
 ANTES DE USAR EM PRODUÇÃO:
   1. Confira no $metadata (GET /b1s/v1/$metadata) os nomes: ApprovalTemplates -> ApprovalTemplateUsers -> UserID
@@ -46,13 +48,12 @@ SL_USER = os.environ["SL_USER"]
 SL_PASSWORD = os.environ["SL_PASSWORD"]
 VERIFY_SSL = os.getenv("SL_VERIFY_SSL", "false").lower() == "true"
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
-STATE_FILE = BASE_DIR / os.getenv("STATE_FILE", "sync_autores_state.json")
+_state_base = Path(os.getenv("STATE_FILE", "sync_autores_state.json"))
+# O CompanyDB entra SEMPRE no nome: cada base tem seu próprio ponto de partida
+STATE_FILE = BASE_DIR / f"{_state_base.stem}_{COMPANY_DB}{_state_base.suffix}"
+RULES_FILE = BASE_DIR / os.getenv("RULES_FILE", "regras_autores.json")
 TIMEOUT = int(os.getenv("SL_TIMEOUT", "60"))
-
-SALES_TEMPLATE_PREFIX = "PV"
-SALES_DEPARTMENT_CODES: set[int] = set()          # ex.: {3, 8}
-SALES_DEPARTMENT_KEYWORDS = ["VENDA", "COMERCIAL"]
-ONLY_ACTIVE_TEMPLATES = False
+ONLY_ACTIVE_TEMPLATES = os.getenv("ONLY_ACTIVE_TEMPLATES", "true").lower() == "true"
 
 if not VERIFY_SSL:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -140,15 +141,23 @@ def save_last_key(key: int) -> None:
 # --------------------------------------------------------------------------
 # Regras
 # --------------------------------------------------------------------------
-def is_sales_template(name: str) -> bool:
-    return (name or "").strip().upper().startswith(SALES_TEMPLATE_PREFIX.upper())
+def load_rules() -> dict:
+    """Lê regras_autores.json: {"default": [...]|null, "departments": {"<Code>": [...]}}."""
+    if not RULES_FILE.exists():
+        raise RuntimeError(f"Arquivo de regras não encontrado: {RULES_FILE}. "
+                           "Copie regras_autores.example.json e ajuste os códigos.")
+    rules = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+    rules["departments"] = {int(k): v for k, v in rules.get("departments", {}).items()}
+    return rules
 
 
-def is_sales_user(dept_code, dept_names: dict) -> bool:
-    if dept_code in SALES_DEPARTMENT_CODES:
-        return True
-    name = (dept_names.get(dept_code) or "").upper()
-    return any(k.upper() in name for k in SALES_DEPARTMENT_KEYWORDS)
+def prefixes_for(dept_code, rules: dict) -> list[str] | None:
+    return rules["departments"].get(dept_code, rules.get("default"))
+
+
+def template_matches(name: str, prefixes: list[str]) -> bool:
+    n = (name or "").strip().upper()
+    return any(n.startswith(p.upper()) for p in prefixes)
 
 
 # --------------------------------------------------------------------------
@@ -175,22 +184,28 @@ def sync() -> None:
             log.info("Nenhum usuário novo desde InternalKey=%s.", last_key)
             return
 
+        rules = load_rules()
         dept_names = {d["Code"]: d.get("Name", "")
                       for d in sl.get_all("Departments?$select=Code,Name")}
 
-        sales_users, other_users, to_rename = [], [], []
+        plan_users, to_rename, skipped = [], [], []   # plan_users: (user, prefixos)
         for u in new_users:
-            sales = is_sales_user(u.get("Department"), dept_names)
-            (sales_users if sales else other_users).append(u)
             name = u.get("UserName") or ""
             if name and name != name.upper():
                 to_rename.append(u)
                 log.info("Usuário %s: nome '%s' -> '%s'",
                          u["UserCode"], name, name.upper())
-            log.info("Novo usuário %s - %s | depto: %s | %s",
-                     u["UserCode"], name.upper(),
-                     dept_names.get(u.get("Department"), "(sem departamento)"),
-                     "VENDAS" if sales else "NÃO VENDAS")
+            dept = u.get("Department")
+            depto = dept_names.get(dept, "(sem departamento)")
+            prefixes = prefixes_for(dept, rules)
+            if not prefixes:
+                skipped.append(u["UserCode"])
+                log.warning("Usuário %s | depto %s (%s) sem regra: NÃO incluído em modelos.",
+                            u["UserCode"], dept, depto)
+                continue
+            plan_users.append((u, prefixes))
+            log.info("Novo usuário %s - %s | depto: %s (%s) | prefixos: %s",
+                     u["UserCode"], name.upper(), dept, depto, ", ".join(prefixes))
 
         templates = sl.get_all("ApprovalTemplates?$select=Code,Name,IsActive")
         if ONLY_ACTIVE_TEMPLATES:
@@ -199,7 +214,7 @@ def sync() -> None:
         # Monta o plano: modelo -> (lista atual de autores, usuários a incluir)
         plan = []
         for t in templates:
-            targets = sales_users if is_sales_template(t["Name"]) else other_users
+            targets = [u for u, pfx in plan_users if template_matches(t["Name"], pfx)]
             if not targets:
                 continue
             tpl = sl.get(f"ApprovalTemplates({t['Code']})")
@@ -210,6 +225,10 @@ def sync() -> None:
                 log.info("Modelo %s (%s): +%s", t["Code"], t["Name"],
                          ", ".join(u["UserCode"] for u in missing))
                 plan.append((t, current, missing))
+
+        if skipped:
+            log.warning("%d usuário(s) sem regra de departamento (tratar manualmente): %s",
+                        len(skipped), ", ".join(skipped))
 
         if not plan and not to_rename:
             log.info("Nada a alterar.")

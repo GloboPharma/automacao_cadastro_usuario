@@ -1,0 +1,10 @@
+{
+  "_comentario": "Copie para regras_autores.json e ajuste. Chave = OUDP.Code (código do departamento); valor = prefixos do NOME do modelo de autorização (sem diferenciar maiúsculas). 'default' vale para departamentos não listados; null = não incluir em nenhum modelo. Os códigos abaixo são EXEMPLOS.",
+  "default": null,
+  "departments": {
+    "7":  ["PV"],
+    "15": ["PV"],
+    "3":  ["SC ", "TRANSF"],
+    "9":  ["PC CONSUMO", "SC EPI"]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "_comentario": "Proposta baseada na cobertura atual da WTM1 em SBOGPHARMA (2026-11-10). Chave = OUDP.Code; valor = prefixos do nome do modelo. Departamento ausente = nenhum modelo (aviso no log).",
+  "_zona_cinzenta_pendente_area": "2 ALMOXARIFADO, 58 ALMOX. DE PROD. ACAB, 26 DIRETORIA, 12 EXPEDICAO, 15 LAB.FISICO QUIMICO, 17 MANUTENCAO, 41 EXC.OPERACIONAL, 42 SEGURANCA TRABALHO, 60 RECURSOS HUMANOS (1 usuário), 43 REPRESENTANTES (só nos modelos não-PV: 64.7%)",
+  "_sem_inclusao": "56, 1, 33, 34, 52, -2, 55, 28, 36, 37, 46, 53, 35 (produção/embalagem/pesagem/geral), 38 REC. HUMANOS, 23 TEC. INFORMACAO",
+  "_fonte": "dados/_WITH_ativos_AS_SELECT_USERID_Department_FROM_SBOGPHARMA_OUSR_WH_202611101802.csv",
+  "default": null,
+  "departments": {
+    "3":  ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "5":  ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "6":  ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "7":  ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "8":  ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "32": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "13": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "14": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "18": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "19": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "20": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "21": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF "],
+    "22": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF ", "PC ", "CTR."],
+    "43": ["PV"],
+    "57": ["SC ", "BRSUPPLY", "CONSUMO", "CONT."],
+    "64": ["SC ", "BRSUPPLY", "CONSUMO", "CONT."],
+    "10": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF ", "SOL "],
+    "11": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF ", "SOL "],
+    "16": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF ", "SOL "],
+    "24": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF ", "SOL "],
+    "25": ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF ", "SOL "],
+    "4":  ["SC ", "BRSUPPLY", "CONSUMO", "CONT.", "NF ", "PV"]
+  }
+}
