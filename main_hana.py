@@ -6,9 +6,12 @@ ATENÇÃO: gravar em tabelas do SAP B1 via SQL NÃO é suportado pela SAP.
 Use apenas em homologação para validar a lógica. Em produção, use main.py
 (Service Layer).
 
-Regra:
-  - Usuário de VENDAS      -> todos os modelos cujo nome começa com "PV"
-  - Usuário NÃO de vendas  -> todos os modelos que NÃO começam com "PV"
+Regras:
+  - Cada departamento (OUDP.Code) recebe os modelos cujo nome começa com um
+    dos prefixos definidos em regras_autores.json (ver regras_autores.example.json)
+  - Departamento sem regra (e "default": null) -> usuário NÃO é incluído (aviso no log)
+  - Nome do usuário (OUSR.U_NAME) gravado sempre em MAIÚSCULAS
+  - Arquivo de estado separado por schema (evita reaproveitar o estado de outra base)
 
 Tabelas:
   OUSR (usuários)  OUDP (departamentos)  OWTM (modelos)  WTM1 (autores)
@@ -37,12 +40,11 @@ HANA_SCHEMA = os.environ["HANA_SCHEMA"]
 HANA_ENCRYPT = os.getenv("HANA_ENCRYPT", "true").lower() == "true"
 HANA_VALIDATE_CERT = os.getenv("HANA_VALIDATE_CERT", "false").lower() == "true"
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
-STATE_FILE = BASE_DIR / os.getenv("HANA_STATE_FILE", "sync_autores_state_hana.json")
-
-SALES_TEMPLATE_PREFIX = "PV"
-SALES_DEPARTMENT_CODES: set[int] = set()          # ex.: {3, 8}
-SALES_DEPARTMENT_KEYWORDS = ["VENDA", "COMERCIAL"]
-ONLY_ACTIVE_TEMPLATES = False
+_state_base = Path(os.getenv("HANA_STATE_FILE", "sync_autores_state_hana.json"))
+# O schema entra SEMPRE no nome: cada base tem seu próprio ponto de partida
+STATE_FILE = BASE_DIR / f"{_state_base.stem}_{HANA_SCHEMA}{_state_base.suffix}"
+RULES_FILE = BASE_DIR / os.getenv("RULES_FILE", "regras_autores.json")
+ONLY_ACTIVE_TEMPLATES = os.getenv("ONLY_ACTIVE_TEMPLATES", "true").lower() == "true"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,15 +119,23 @@ def save_last_key(key: int) -> None:
 # --------------------------------------------------------------------------
 # Regras
 # --------------------------------------------------------------------------
-def is_sales_template(name: str) -> bool:
-    return (name or "").strip().upper().startswith(SALES_TEMPLATE_PREFIX.upper())
+def load_rules() -> dict:
+    """Lê regras_autores.json: {"default": [...]|null, "departments": {"<Code>": [...]}}."""
+    if not RULES_FILE.exists():
+        raise RuntimeError(f"Arquivo de regras não encontrado: {RULES_FILE}. "
+                           "Copie regras_autores.example.json e ajuste os códigos.")
+    rules = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+    rules["departments"] = {int(k): v for k, v in rules.get("departments", {}).items()}
+    return rules
 
 
-def is_sales_user(dept_code, dept_names: dict) -> bool:
-    if dept_code in SALES_DEPARTMENT_CODES:
-        return True
-    name = (dept_names.get(dept_code) or "").upper()
-    return any(k.upper() in name for k in SALES_DEPARTMENT_KEYWORDS)
+def prefixes_for(dept_code, rules: dict) -> list[str] | None:
+    return rules["departments"].get(dept_code, rules.get("default"))
+
+
+def template_matches(name: str, prefixes: list[str]) -> bool:
+    n = (name or "").strip().upper()
+    return any(n.startswith(p.upper()) for p in prefixes)
 
 
 # --------------------------------------------------------------------------
@@ -133,7 +143,8 @@ def is_sales_user(dept_code, dept_names: dict) -> bool:
 # --------------------------------------------------------------------------
 def sync() -> None:
     conn = connect()
-    log.info("Conectado ao HANA %s:%s, schema %s", HANA_HOST, HANA_PORT, HANA_SCHEMA)
+    log.info("Conectado ao HANA %s:%s, schema %s | estado: %s | regras: %s",
+             HANA_HOST, HANA_PORT, HANA_SCHEMA, STATE_FILE.name, RULES_FILE.name)
     try:
         users = fetch(conn, f"""
             SELECT "USERID", "USER_CODE", "U_NAME", "Department", "Locked"
@@ -153,19 +164,25 @@ def sync() -> None:
             log.info("Nenhum usuário novo desde USERID=%s.", last_key)
             return
 
+        rules = load_rules()
         dept_names = dict(fetch(conn, f'SELECT "Code", "Name" FROM {S}."OUDP"'))
 
-        sales_users, other_users, to_rename = [], [], []
+        plan_users, to_rename, skipped = [], [], []
         for uid, code, name, dept, _ in new_users:
-            sales = is_sales_user(dept, dept_names)
-            (sales_users if sales else other_users).append((uid, code))
             upper_name = (name or "").upper()
             if name and name != upper_name:
                 to_rename.append((upper_name, uid))
                 log.info("Usuário %s: nome '%s' -> '%s'", code, name, upper_name)
-            log.info("Novo usuário %s - %s | depto: %s | %s", code, upper_name,
-                     dept_names.get(dept, "(sem departamento)"),
-                     "VENDAS" if sales else "NÃO VENDAS")
+            depto = dept_names.get(dept, "(sem departamento)")
+            prefixes = prefixes_for(dept, rules)
+            if not prefixes:
+                skipped.append(code)
+                log.warning("Usuário %s | depto %s (%s) sem regra: NÃO incluído em modelos.",
+                            code, dept, depto)
+                continue
+            plan_users.append((uid, code, prefixes))
+            log.info("Novo usuário %s - %s | depto: %s (%s) | prefixos: %s",
+                     code, upper_name, dept, depto, ", ".join(prefixes))
 
         tpl_sql = f'SELECT "WtmCode", "Name", "Active" FROM {S}."OWTM"'
         if ONLY_ACTIVE_TEMPLATES:
@@ -176,13 +193,17 @@ def sync() -> None:
 
         to_insert = []
         for wtm_code, tpl_name, _ in templates:
-            targets = sales_users if is_sales_template(tpl_name) else other_users
-            missing = [(uid, code) for uid, code in targets
-                       if (wtm_code, uid) not in existing]
+            missing = [(uid, code) for uid, code, pfx in plan_users
+                       if template_matches(tpl_name, pfx)
+                       and (wtm_code, uid) not in existing]
             if missing:
                 log.info("Modelo %s (%s): +%s", wtm_code, tpl_name,
                          ", ".join(c for _, c in missing))
                 to_insert += [(wtm_code, uid) for uid, _ in missing]
+
+        if skipped:
+            log.warning("%d usuário(s) sem regra de departamento (tratar manualmente): %s",
+                        len(skipped), ", ".join(skipped))
 
         if not to_insert and not to_rename:
             log.info("Nada a alterar.")

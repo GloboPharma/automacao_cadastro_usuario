@@ -30,3 +30,5 @@ sync_autores_state*.json
 Thumbs.db
 desktop.ini
 .DS_Store
+# --- Exportações de consultas (dados de produção, não versionar) ---
+dados/
