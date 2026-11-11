@@ -28,6 +28,39 @@ departamento**, no arquivo `regras_autores.json`:
   no fim do log, para tratamento manual.
 - Chaves que começam com `_` são comentários e são ignoradas.
 
+### Usuário-espelho (somente `main_hana.py`)
+
+Em vez de prefixos, um departamento pode apontar para um **usuário de referência**.
+O usuário tratado recebe os mesmos modelos que o espelho tem **hoje** na `WTM1`:
+
+```json
+{
+  "espelhos": {
+    "40": "alvaro.lopes"
+  }
+}
+```
+
+- **Chave:** código do departamento; **valor:** `USER_CODE` do espelho.
+- O espelho tem **prioridade** sobre os prefixos do mesmo departamento.
+- Para mudar o que o departamento recebe, ajuste os modelos do espelho no próprio SAP.
+- Se o espelho não existir, estiver bloqueado ou não estiver em nenhum modelo, o
+  usuário **não** é incluído (aviso no log).
+- O `main.py` ignora a seção `espelhos` e continua usando os prefixos.
+
+### Corrigir usuários já existentes (somente `main_hana.py`)
+
+Por padrão só usuários novos são tratados. Para aplicar a regra a usuários já
+existentes, informe os `USER_CODE`s no `.env`:
+
+```ini
+CORRIGIR_USUARIOS=grazielle.correa,joao.silva
+```
+
+Eles recebem apenas os modelos que faltam (nada é removido; modelos fora da regra
+são mantidos). Respeita `DRY_RUN` e não altera o ponto de partida. Depois de
+corrigir, esvazie a variável.
+
 As regras iniciais foram derivadas da cobertura atual de autores em produção: os
 usuários de um mesmo departamento costumam ser autores de toda uma família de
 modelos (SC, BRSUPPLY, CONSUMO...) ou de nenhuma. Os códigos de departamento podem
@@ -39,8 +72,11 @@ Regras adicionais:
   O código de login (`USER_CODE`) não é alterado.
 - Apenas usuários **novos** são processados. O controle é feito pelo último
   `USERID` / `InternalKey` processado, salvo em um arquivo de estado **por base**.
+  Exceção: os usuários listados em `CORRIGIR_USUARIOS` (`main_hana.py`).
 - Usuários **bloqueados** são ignorados.
-- Por padrão, só modelos **ativos** recebem autores (`ONLY_ACTIVE_TEMPLATES`).
+- Por padrão, só modelos **ativos** recebem autores (`ONLY_ACTIVE_TEMPLATES`). Vale
+  também para o espelho: modelos inativos do espelho não são copiados.
+- Vínculos existentes **nunca são removidos**; o script só inclui o que falta.
 - O script é **idempotente**: não duplica autores que já existem no modelo.
 
 ## Estrutura do projeto
@@ -67,6 +103,7 @@ Arquivos gerados em tempo de execução (ignorados pelo Git):
 | `sync_autores_hana.log` | Log do `main_hana.py` |
 | `sync_autores_state_<CompanyDB>.json` | Último usuário processado pelo `main.py`, por base |
 | `sync_autores_state_hana_<SCHEMA>.json` | Último usuário processado pelo `main_hana.py`, por schema |
+| `usuarios_sem_modelo_<SCHEMA>.csv` | Usuários ativos (não bloqueados) sem nenhum modelo de autorização, gerado pelo `main_hana.py` a cada execução (inclusive em `DRY_RUN`). Só relatório: nada é gravado no banco |
 
 O nome da base entra sempre no nome do arquivo de estado. Assim, ao apontar o
 `.env` para outra base, a primeira execução nela apenas grava o ponto de partida,
@@ -150,6 +187,7 @@ Copy-Item .env.example .env
 | `DRY_RUN` | `true` apenas simula e registra no log; `false` grava no SAP B1 | `true` |
 | `RULES_FILE` | Arquivo de regras departamento → modelos | `regras_autores.json` |
 | `ONLY_ACTIVE_TEMPLATES` | `true` inclui só modelos ativos; `false` inclui também os inativos | `true` |
+| `CORRIGIR_USUARIOS` | `main_hana.py`: `USER_CODE`s já existentes, separados por vírgula, a corrigir pela regra do departamento | vazio |
 
 > O `.env` é carregado com prioridade sobre as variáveis de ambiente do sistema.
 > Para mudar uma configuração (por exemplo, `DRY_RUN`), altere o próprio `.env`:
@@ -168,10 +206,12 @@ py .\main_hana.py     # via HANA direto (testes)
    maior `USERID` atual) e não altera nada. Usuários já existentes não são tocados.
 2. Cadastre um usuário de teste no SAP B1.
 3. Rode com `DRY_RUN=true` e confira no log:
-   - o departamento do usuário e os prefixos aplicados;
+   - o departamento do usuário e a regra aplicada (prefixos ou espelho);
+   - quantos modelos ele já tem e quantos faltam;
    - os avisos de usuários cujo departamento não tem regra;
    - a conversão do nome para maiúsculas;
-   - a lista de modelos em que ele seria incluído.
+   - a lista de modelos em que ele seria incluído (linhas `+ <código> <modelo>`);
+   - no `main_hana.py`, o relatório de usuários ativos sem nenhum modelo.
 4. Se estiver correto, altere para `DRY_RUN=false` e rode novamente.
 5. No SAP B1, reabra *Modelos de autorização – Definição* e confira a aba *Autor*.
 
@@ -179,7 +219,16 @@ py .\main_hana.py     # via HANA direto (testes)
 > sendo tratado como novo até uma execução com `DRY_RUN=false`.
 
 Para reprocessar usuários em testes, edite o arquivo de estado e reduza o valor
-de `last_internal_key`.
+de `last_internal_key`. No `main_hana.py`, prefira `CORRIGIR_USUARIOS` para tratar
+usuários específicos já existentes.
+
+### Corrigir um usuário existente (`main_hana.py`)
+
+1. Garanta que o departamento dele tem regra (prefixos ou espelho) no `regras_autores.json`.
+2. No `.env`: `CORRIGIR_USUARIOS=<user_code>` e `DRY_RUN=true`. Rode e confira o log
+   (`Correção usuário ... | já tem X, faltam Y` e a lista de modelos).
+3. Altere para `DRY_RUN=false` e rode novamente.
+4. Volte para `DRY_RUN=true` e esvazie `CORRIGIR_USUARIOS=`.
 
 ## Agendamento (Windows)
 
@@ -203,6 +252,9 @@ script, independentemente do diretório de execução.
 | Erro de SSL na conexão HANA | Servidor sem TLS na porta SQL | `HANA_ENCRYPT=false` |
 | `Arquivo de regras não encontrado` | `regras_autores.json` ausente | Copiar `regras_autores.example.json` e ajustar os códigos |
 | `sem regra: NÃO incluído em modelos` no log | Departamento do usuário não está em `regras_autores.json` | Incluir o departamento nas regras ou tratar o usuário manualmente |
+| `espelho '...' não encontrado na OUSR` / `está bloqueado` / `não está em nenhum modelo` | `USER_CODE` do espelho errado, bloqueado ou sem modelos ativos | Corrigir o espelho em `espelhos` no `regras_autores.json` |
+| `CORRIGIR_USUARIOS: usuário '...' não encontrado` | `USER_CODE` digitado errado no `.env` | Conferir o código de login no SAP B1 |
+| Log mostra `DRY_RUN ativo` mesmo com `DRY_RUN=false` | `.env` não salvo ou linha do `DRY_RUN` alterada no script | Salvar o `.env`; a linha no script deve ser `... == "true"` |
 | `Estrutura da WTM1 diferente do esperado` | Colunas obrigatórias extras na `WTM1` | Ajustar o `INSERT` no `main_hana.py` |
 | Autor não aparece na tela do B1 | Cache do cliente B1 | Reabrir a tela ou fazer logoff/logon |
 

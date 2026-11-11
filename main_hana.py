@@ -9,17 +9,27 @@ Use apenas em homologação para validar a lógica. Em produção, use main.py
 Regras:
   - Cada departamento (OUDP.Code) recebe os modelos cujo nome começa com um
     dos prefixos definidos em regras_autores.json (ver regras_autores.example.json)
+  - Usuário-espelho: em "espelhos" de regras_autores.json, um departamento pode
+    apontar para um usuário de referência; o usuário recebe os mesmos modelos que
+    o espelho tem hoje. O espelho tem prioridade sobre os prefixos.
   - Departamento sem regra (e "default": null) -> usuário NÃO é incluído (aviso no log)
+  - CORRIGIR_USUARIOS (no .env): lista de USER_CODEs já existentes que também são
+    tratados pela regra (só inclui modelos faltantes; nunca remove vínculos)
   - Nome do usuário (OUSR.U_NAME) gravado sempre em MAIÚSCULAS
   - Arquivo de estado separado por schema (evita reaproveitar o estado de outra base)
+  - Ao final de toda execução, lista os usuários ativos (não bloqueados) que não
+    estão em nenhum modelo de autorização (log + usuarios_sem_modelo_<SCHEMA>.csv).
+    Apenas relatório: nada é gravado no banco.
 
 Tabelas:
   OUSR (usuários)  OUDP (departamentos)  OWTM (modelos)  WTM1 (autores)
 """
+import csv
 import json
 import os
 import sys
 import logging
+from collections import defaultdict
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -39,11 +49,21 @@ HANA_PASSWORD = os.environ["HANA_PASSWORD"]
 HANA_SCHEMA = os.environ["HANA_SCHEMA"]
 HANA_ENCRYPT = os.getenv("HANA_ENCRYPT", "true").lower() == "true"
 HANA_VALIDATE_CERT = os.getenv("HANA_VALIDATE_CERT", "false").lower() == "true"
+
+# Padrão do script: DRY_RUN = true (apenas loga, não grava nada). Para gravar, use DRY_RUN=false
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+
 _state_base = Path(os.getenv("HANA_STATE_FILE", "sync_autores_state_hana.json"))
+
 # O schema entra SEMPRE no nome: cada base tem seu próprio ponto de partida
 STATE_FILE = BASE_DIR / f"{_state_base.stem}_{HANA_SCHEMA}{_state_base.suffix}"
 RULES_FILE = BASE_DIR / os.getenv("RULES_FILE", "regras_autores.json")
+UNLINKED_FILE = BASE_DIR / f"usuarios_sem_modelo_{HANA_SCHEMA}.csv"
+
+# USER_CODEs de usuários JÁ existentes a corrigir pela regra do departamento,
+# separados por vírgula (ex.: CORRIGIR_USUARIOS=grazielle.correa,joao.silva).
+# Só inclui modelos faltantes; nunca remove. Respeita DRY_RUN.
+FIX_USERS = os.getenv("CORRIGIR_USUARIOS", "")
 ONLY_ACTIVE_TEMPLATES = os.getenv("ONLY_ACTIVE_TEMPLATES", "true").lower() == "true"
 
 logging.basicConfig(
@@ -120,12 +140,18 @@ def save_last_key(key: int) -> None:
 # Regras
 # --------------------------------------------------------------------------
 def load_rules() -> dict:
-    """Lê regras_autores.json: {"default": [...]|null, "departments": {"<Code>": [...]}}."""
+    """Lê regras_autores.json:
+    {"default": [...]|null,
+     "departments": {"<Code>": [prefixos]},
+     "espelhos":    {"<Code>": "<USER_CODE do usuário-espelho>"}}   (só main_hana.py)
+    O espelho tem prioridade sobre os prefixos do mesmo departamento."""
     if not RULES_FILE.exists():
         raise RuntimeError(f"Arquivo de regras não encontrado: {RULES_FILE}. "
                            "Copie regras_autores.example.json e ajuste os códigos.")
     rules = json.loads(RULES_FILE.read_text(encoding="utf-8"))
     rules["departments"] = {int(k): v for k, v in rules.get("departments", {}).items()}
+    rules["espelhos"] = {int(k): v.strip().lower()
+                         for k, v in rules.get("espelhos", {}).items() if v and v.strip()}
     return rules
 
 
@@ -138,6 +164,58 @@ def template_matches(name: str, prefixes: list[str]) -> bool:
     return any(n.startswith(p.upper()) for p in prefixes)
 
 
+def expected_templates(dept, rules: dict, templates: dict, links: dict,
+                       by_code: dict) -> tuple[set | None, str]:
+    """Modelos que um usuário do departamento deve ter e a origem da regra.
+    Retorna (None, motivo) quando não há regra aplicável."""
+    mirror_code = rules["espelhos"].get(dept)
+    if mirror_code:
+        mirror = by_code.get(mirror_code)
+        if mirror is None:
+            return None, f"espelho '{mirror_code}' não encontrado na OUSR"
+        if mirror[4] == "Y":
+            return None, f"espelho '{mirror[1]}' está bloqueado"
+        target = links[mirror[0]] & templates.keys()
+        if not target:
+            return None, f"espelho '{mirror[1]}' não está em nenhum modelo"
+        return target, f"espelho: {mirror[1]} ({len(target)} modelos)"
+    prefixes = prefixes_for(dept, rules)
+    if prefixes:
+        target = {w for w, n in templates.items() if template_matches(n, prefixes)}
+        return target, f"prefixos: {', '.join(prefixes)} ({len(target)} modelos)"
+    return None, "sem regra"
+
+
+# --------------------------------------------------------------------------
+# Relatório
+# --------------------------------------------------------------------------
+def report_unlinked(conn, dept_names: dict) -> list[tuple]:
+    """Lista usuários ativos sem nenhuma linha na WTM1 (log + CSV). Não grava no banco."""
+    rows = fetch(conn, f"""
+        SELECT u."USERID", u."USER_CODE", u."U_NAME", u."Department"
+          FROM {S}."OUSR" u
+         WHERE IFNULL(u."Locked", 'N') <> 'Y'
+           AND NOT EXISTS (SELECT 1 FROM {S}."WTM1" w WHERE w."UserID" = u."USERID")
+         ORDER BY u."USERID"
+    """)
+
+    with UNLINKED_FILE.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow(["USERID", "USER_CODE", "U_NAME", "Department", "DeptName"])
+        for uid, code, name, dept in rows:
+            writer.writerow([uid, code, name, dept, dept_names.get(dept, "")])
+
+    if not rows:
+        log.info("Todos os usuários ativos estão em pelo menos um modelo de autorização.")
+    else:
+        log.warning("%d usuário(s) ativo(s) sem nenhum modelo de autorização (ver %s):",
+                    len(rows), UNLINKED_FILE.name)
+        for uid, code, name, dept in rows:
+            log.warning("  %s - %s | depto %s (%s)", code, name, dept,
+                        dept_names.get(dept, "(sem departamento)"))
+    return rows
+
+
 # --------------------------------------------------------------------------
 # Sincronização
 # --------------------------------------------------------------------------
@@ -146,99 +224,122 @@ def sync() -> None:
     log.info("Conectado ao HANA %s:%s, schema %s | estado: %s | regras: %s",
              HANA_HOST, HANA_PORT, HANA_SCHEMA, STATE_FILE.name, RULES_FILE.name)
     try:
-        users = fetch(conn, f"""
-            SELECT "USERID", "USER_CODE", "U_NAME", "Department", "Locked"
-              FROM {S}."OUSR"
-        """)
-        max_key = max(u[0] for u in users)
+        dept_names = dict(fetch(conn, f'SELECT "Code", "Name" FROM {S}."OUDP"'))
+        _sync_new_users(conn, dept_names)
+        # Depois do commit: os usuários recém-incluídos já não aparecem na lista
+        report_unlinked(conn, dept_names)
+    finally:
+        conn.close()
 
-        last_key = load_last_key()
-        if last_key is None:
-            save_last_key(max_key)
-            log.info("Primeira execução: ponto de partida gravado (USERID=%s). "
-                     "Nenhuma alteração feita.", max_key)
-            return
 
+def _sync_new_users(conn, dept_names: dict) -> None:
+    users = fetch(conn, f"""
+        SELECT "USERID", "USER_CODE", "U_NAME", "Department", "Locked"
+          FROM {S}."OUSR"
+    """)
+    max_key = max(u[0] for u in users)
+    by_code = {(u[1] or "").strip().lower(): u for u in users}
+
+    last_key = load_last_key()
+    if last_key is None:
+        save_last_key(max_key)
+        log.info("Primeira execução: ponto de partida gravado (USERID=%s). "
+                 "Nenhum usuário novo tratado.", max_key)
+        new_users = []
+    else:
         new_users = [u for u in users if u[0] > last_key and u[4] != "Y"]
         if not new_users:
             log.info("Nenhum usuário novo desde USERID=%s.", last_key)
-            return
 
-        rules = load_rules()
-        dept_names = dict(fetch(conn, f'SELECT "Code", "Name" FROM {S}."OUDP"'))
+    # Usuários JÁ existentes indicados para correção (CORRIGIR_USUARIOS no .env)
+    new_ids = {u[0] for u in new_users}
+    fix_users = []
+    for c in sorted({c.strip().lower() for c in FIX_USERS.split(",") if c.strip()}):
+        u = by_code.get(c)
+        if u is None:
+            log.warning("CORRIGIR_USUARIOS: usuário '%s' não encontrado na OUSR.", c)
+        elif u[4] == "Y":
+            log.warning("CORRIGIR_USUARIOS: usuário '%s' está bloqueado; ignorado.", u[1])
+        elif u[0] not in new_ids:
+            fix_users.append(u)
 
-        plan_users, to_rename, skipped = [], [], []
-        for uid, code, name, dept, _ in new_users:
-            upper_name = (name or "").upper()
-            if name and name != upper_name:
-                to_rename.append((upper_name, uid))
-                log.info("Usuário %s: nome '%s' -> '%s'", code, name, upper_name)
-            depto = dept_names.get(dept, "(sem departamento)")
-            prefixes = prefixes_for(dept, rules)
-            if not prefixes:
-                skipped.append(code)
-                log.warning("Usuário %s | depto %s (%s) sem regra: NÃO incluído em modelos.",
-                            code, dept, depto)
-                continue
-            plan_users.append((uid, code, prefixes))
-            log.info("Novo usuário %s - %s | depto: %s (%s) | prefixos: %s",
-                     code, upper_name, dept, depto, ", ".join(prefixes))
+    if not new_users and not fix_users:
+        return
 
-        tpl_sql = f'SELECT "WtmCode", "Name", "Active" FROM {S}."OWTM"'
-        if ONLY_ACTIVE_TEMPLATES:
-            tpl_sql += ' WHERE "Active" = \'Y\''
-        templates = fetch(conn, tpl_sql)
+    rules = load_rules()
 
-        existing = set(fetch(conn, f'SELECT "WtmCode", "UserID" FROM {S}."WTM1"'))
+    tpl_sql = f'SELECT "WtmCode", "Name", "Active" FROM {S}."OWTM"'
+    if ONLY_ACTIVE_TEMPLATES:
+        tpl_sql += ' WHERE "Active" = \'Y\''
+    templates = {w: n for w, n, _ in fetch(conn, tpl_sql)}
 
-        to_insert = []
-        for wtm_code, tpl_name, _ in templates:
-            missing = [(uid, code) for uid, code, pfx in plan_users
-                       if template_matches(tpl_name, pfx)
-                       and (wtm_code, uid) not in existing]
-            if missing:
-                log.info("Modelo %s (%s): +%s", wtm_code, tpl_name,
-                         ", ".join(c for _, c in missing))
-                to_insert += [(wtm_code, uid) for uid, _ in missing]
+    links = defaultdict(set)   # USERID -> modelos em que já é autor
+    for w, u in fetch(conn, f'SELECT "WtmCode", "UserID" FROM {S}."WTM1"'):
+        links[u].add(w)
 
-        if skipped:
-            log.warning("%d usuário(s) sem regra de departamento (tratar manualmente): %s",
-                        len(skipped), ", ".join(skipped))
+    to_rename, to_insert, skipped = [], [], []
+    for kind, (uid, code, name, dept, _) in ([("Novo", u) for u in new_users]
+                                             + [("Correção", u) for u in fix_users]):
+        upper_name = (name or "").upper()
+        if name and name != upper_name:
+            to_rename.append((upper_name, uid))
+            log.info("Usuário %s: nome '%s' -> '%s'", code, name, upper_name)
+        depto = dept_names.get(dept, "(sem departamento)")
+        target, origem = expected_templates(dept, rules, templates, links, by_code)
+        if target is None:
+            skipped.append(code)
+            log.warning("%s usuário %s | depto %s (%s) | %s: NÃO incluído em modelos.",
+                        kind, code, dept, depto, origem)
+            continue
+        missing = sorted(target - links[uid])
+        extra = len((links[uid] & templates.keys()) - target)
+        log.info("%s usuário %s - %s | depto %s (%s) | %s | já tem %d, faltam %d%s",
+                 kind, code, upper_name, dept, depto, origem,
+                 len(target & links[uid]), len(missing),
+                 f", {extra} fora da regra (mantidos)" if extra else "")
+        for w in missing:
+            log.info("    + %s %s", w, templates[w])
+        to_insert += [(w, uid) for w in missing]
 
-        if not to_insert and not to_rename:
-            log.info("Nada a alterar.")
-        elif DRY_RUN:
-            log.info("DRY_RUN ativo: %d nomes seriam convertidos para maiúsculas "
-                     "e %d linhas seriam inseridas na WTM1. Nada gravado.",
-                     len(to_rename), len(to_insert))
-            return
-        else:
+    if skipped:
+        log.warning("%d usuário(s) sem regra de departamento (tratar manualmente): %s",
+                    len(skipped), ", ".join(skipped))
+
+    if not to_insert and not to_rename:
+        log.info("Nada a alterar.")
+    elif DRY_RUN:
+        log.info("DRY_RUN ativo: %d nomes seriam convertidos para maiúsculas "
+                 "e %d linhas seriam inseridas na WTM1. Nada gravado.",
+                 len(to_rename), len(to_insert))
+        return
+    else:
+        if to_insert:
+            check_wtm1_structure(conn)
+        cur = conn.cursor()
+        try:
+            # Tudo na mesma transação: ou grava tudo, ou nada
+            if to_rename:
+                cur.executemany(
+                    f'UPDATE {S}."OUSR" SET "U_NAME" = ? WHERE "USERID" = ?',
+                    to_rename)
             if to_insert:
-                check_wtm1_structure(conn)
-            cur = conn.cursor()
-            try:
-                # Tudo na mesma transação: ou grava tudo, ou nada
-                if to_rename:
-                    cur.executemany(
-                        f'UPDATE {S}."OUSR" SET "U_NAME" = ? WHERE "USERID" = ?',
-                        to_rename)
-                if to_insert:
-                    cur.executemany(
-                        f'INSERT INTO {S}."WTM1" ("WtmCode", "UserID") VALUES (?, ?)',
-                        to_insert)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                cur.close()
-            log.info("%d nomes convertidos para maiúsculas; %d linhas inseridas na WTM1.",
-                     len(to_rename), len(to_insert))
+                cur.executemany(
+                    f'INSERT INTO {S}."WTM1" ("WtmCode", "UserID") VALUES (?, ?)',
+                    to_insert)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+        log.info("%d nomes convertidos para maiúsculas; %d linhas inseridas na WTM1.",
+                 len(to_rename), len(to_insert))
 
+    if new_users:
         save_last_key(max(u[0] for u in new_users))
         log.info("Concluído. Ponto de partida atualizado.")
-    finally:
-        conn.close()
+    else:
+        log.info("Concluído.")
 
 
 if __name__ == "__main__":
