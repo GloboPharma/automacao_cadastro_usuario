@@ -21,6 +21,9 @@ __pycache__/
 # --- Arquivos de estado (último USERID processado, por ambiente) ---
 sync_autores_state*.json
 
+# --- Relatório de usuários sem modelo de autorização (gerado a cada execução) ---
+usuarios_sem_modelo_*.csv
+
 # --- Editores / IDEs ---
 .vscode/
 .idea/
