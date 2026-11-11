@@ -143,7 +143,7 @@ def load_rules() -> dict:
     """Lê regras_autores.json:
     {"default": [...]|null,
      "departments": {"<Code>": [prefixos]},
-     "espelhos":    {"<Code>": "<USER_CODE do usuário-espelho>"}}   (só main_hana.py)
+     "espelhos":    {"<Code>": "<USER_CODE do usuário-espelho>"}}
     O espelho tem prioridade sobre os prefixos do mesmo departamento."""
     if not RULES_FILE.exists():
         raise RuntimeError(f"Arquivo de regras não encontrado: {RULES_FILE}. "

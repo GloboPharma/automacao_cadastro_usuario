@@ -28,10 +28,11 @@ departamento**, no arquivo `regras_autores.json`:
   no fim do log, para tratamento manual.
 - Chaves que começam com `_` são comentários e são ignoradas.
 
-### Usuário-espelho (somente `main_hana.py`)
+### Usuário-espelho
 
 Em vez de prefixos, um departamento pode apontar para um **usuário de referência**.
-O usuário tratado recebe os mesmos modelos que o espelho tem **hoje** na `WTM1`:
+O usuário tratado recebe os mesmos modelos que o espelho tem **hoje** (aba *Autor*
+dos modelos / tabela `WTM1`):
 
 ```json
 {
@@ -46,9 +47,8 @@ O usuário tratado recebe os mesmos modelos que o espelho tem **hoje** na `WTM1`
 - Para mudar o que o departamento recebe, ajuste os modelos do espelho no próprio SAP.
 - Se o espelho não existir, estiver bloqueado ou não estiver em nenhum modelo, o
   usuário **não** é incluído (aviso no log).
-- O `main.py` ignora a seção `espelhos` e continua usando os prefixos.
 
-### Corrigir usuários já existentes (somente `main_hana.py`)
+### Corrigir usuários já existentes
 
 Por padrão só usuários novos são tratados. Para aplicar a regra a usuários já
 existentes, informe os `USER_CODE`s no `.env`:
@@ -72,7 +72,7 @@ Regras adicionais:
   O código de login (`USER_CODE`) não é alterado.
 - Apenas usuários **novos** são processados. O controle é feito pelo último
   `USERID` / `InternalKey` processado, salvo em um arquivo de estado **por base**.
-  Exceção: os usuários listados em `CORRIGIR_USUARIOS` (`main_hana.py`).
+  Exceção: os usuários listados em `CORRIGIR_USUARIOS`.
 - Usuários **bloqueados** são ignorados.
 - Por padrão, só modelos **ativos** recebem autores (`ONLY_ACTIVE_TEMPLATES`). Vale
   também para o espelho: modelos inativos do espelho não são copiados.
@@ -103,7 +103,7 @@ Arquivos gerados em tempo de execução (ignorados pelo Git):
 | `sync_autores_hana.log` | Log do `main_hana.py` |
 | `sync_autores_state_<CompanyDB>.json` | Último usuário processado pelo `main.py`, por base |
 | `sync_autores_state_hana_<SCHEMA>.json` | Último usuário processado pelo `main_hana.py`, por schema |
-| `usuarios_sem_modelo_<SCHEMA>.csv` | Usuários ativos (não bloqueados) sem nenhum modelo de autorização, gerado pelo `main_hana.py` a cada execução (inclusive em `DRY_RUN`). Só relatório: nada é gravado no banco |
+| `usuarios_sem_modelo_<CompanyDB ou SCHEMA>.csv` | Usuários ativos (não bloqueados) sem nenhum modelo de autorização, gerado pelos dois scripts a cada execução (inclusive em `DRY_RUN`). Só relatório: nada é gravado no SAP |
 
 O nome da base entra sempre no nome do arquivo de estado. Assim, ao apontar o
 `.env` para outra base, a primeira execução nela apenas grava o ponto de partida,
@@ -187,7 +187,7 @@ Copy-Item .env.example .env
 | `DRY_RUN` | `true` apenas simula e registra no log; `false` grava no SAP B1 | `true` |
 | `RULES_FILE` | Arquivo de regras departamento → modelos | `regras_autores.json` |
 | `ONLY_ACTIVE_TEMPLATES` | `true` inclui só modelos ativos; `false` inclui também os inativos | `true` |
-| `CORRIGIR_USUARIOS` | `main_hana.py`: `USER_CODE`s já existentes, separados por vírgula, a corrigir pela regra do departamento | vazio |
+| `CORRIGIR_USUARIOS` | `USER_CODE`s já existentes, separados por vírgula, a corrigir pela regra do departamento | vazio |
 
 > O `.env` é carregado com prioridade sobre as variáveis de ambiente do sistema.
 > Para mudar uma configuração (por exemplo, `DRY_RUN`), altere o próprio `.env`:
@@ -211,7 +211,7 @@ py .\main_hana.py     # via HANA direto (testes)
    - os avisos de usuários cujo departamento não tem regra;
    - a conversão do nome para maiúsculas;
    - a lista de modelos em que ele seria incluído (linhas `+ <código> <modelo>`);
-   - no `main_hana.py`, o relatório de usuários ativos sem nenhum modelo.
+   - o relatório de usuários ativos sem nenhum modelo.
 4. Se estiver correto, altere para `DRY_RUN=false` e rode novamente.
 5. No SAP B1, reabra *Modelos de autorização – Definição* e confira a aba *Autor*.
 
@@ -219,10 +219,10 @@ py .\main_hana.py     # via HANA direto (testes)
 > sendo tratado como novo até uma execução com `DRY_RUN=false`.
 
 Para reprocessar usuários em testes, edite o arquivo de estado e reduza o valor
-de `last_internal_key`. No `main_hana.py`, prefira `CORRIGIR_USUARIOS` para tratar
+de `last_internal_key`. Prefira `CORRIGIR_USUARIOS` para tratar
 usuários específicos já existentes.
 
-### Corrigir um usuário existente (`main_hana.py`)
+### Corrigir um usuário existente
 
 1. Garanta que o departamento dele tem regra (prefixos ou espelho) no `regras_autores.json`.
 2. No `.env`: `CORRIGIR_USUARIOS=<user_code>` e `DRY_RUN=true`. Rode e confira o log

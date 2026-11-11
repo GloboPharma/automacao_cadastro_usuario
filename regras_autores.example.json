@@ -1,6 +1,6 @@
 {
   "_comentario": "Copie para regras_autores.json e ajuste. Chave = OUDP.Code (código do departamento); valor = prefixos do NOME do modelo de autorização (sem diferenciar maiúsculas). 'default' vale para departamentos não listados; null = não incluir em nenhum modelo. Os códigos abaixo são EXEMPLOS.",
-  "_comentario_espelhos": "Somente main_hana.py. Chave = OUDP.Code; valor = USER_CODE do usuário-espelho. O usuário recebe os mesmos modelos que o espelho tem hoje. Tem prioridade sobre 'departments'.",
+  "_comentario_espelhos": "Chave = OUDP.Code; valor = USER_CODE do usuário-espelho. O usuário recebe os mesmos modelos que o espelho tem hoje. Tem prioridade sobre 'departments'.",
   "default": null,
   "departments": {
     "7":  ["PV"],
